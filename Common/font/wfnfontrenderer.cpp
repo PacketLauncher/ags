@@ -324,55 +324,14 @@ static int RenderChar(Bitmap* ds, const int at_x, const int at_y, Rect clip,
 
                         int red, green, blue;
 
-                        if (shade < base_shade)
-                        {
-                            // Linearly darken each RGB component toward black.
-                            red = base_red * shade / base_shade;
-                            green = base_green * shade / base_shade;
-                            blue = base_blue * shade / base_shade;
-                        }
-                        
-                        else
-                        {
-                            // This is a simplified formula, but it generates washed-out highlights.
-                            // For the time being, it is commented out for the curved progression formula below it.
-                            /*
-                            // Linearly brighten each RGB component toward white.
-                            const int range = 15 - base_shade;
-                            const int offset = shade - base_shade;
+                        // Apply fixed RGB increments of 17 per shade relative to the base color.
+                        // Shade values below the base darken; values above it brighten.
+                        // Clamp each component to the valid 0-255 range.
+                        const int offset = (static_cast<int>(shade) - base_shade) * 17;
 
-                            red = base_red + (255 - base_red) * offset / range;
-                            green = base_green + (255 - base_green) * offset / range;
-                            blue = base_blue + (255 - base_blue) * offset / range;
-                            */
-
-                            // Brighten shades above the base color using a curved progression.
-                            const float t = static_cast<float>(shade - base_shade) /
-                                (15 - base_shade);
-
-                            const float highlight = std::pow(t, 0.85f);
-
-                            // Reduce the highlight strength for weaker RGB components
-                            // to preserve more of the original color saturation.
-                            const float red_strength = 0.35f + 0.65f * base_red / 255.0f;
-                            const float green_strength = 0.35f + 0.65f * base_green / 255.0f;
-                            const float blue_strength = 0.20f + 0.80f * base_blue / 255.0f;
-
-                            const bool is_magenta = base_red > 180 && base_blue > 180 && base_green < 150;
-                            const bool is_dark_blue = base_blue > base_red * 1.5f &&
-                                base_blue > base_green * 1.5f && base_red < 100;
-
-                            float adjusted_green_strength = green_strength;
-
-                            if (is_magenta)
-                                adjusted_green_strength = std::min(1.0f, green_strength * 1.25f);
-                            else if (is_dark_blue)
-                                adjusted_green_strength = std::min(1.0f, green_strength * 1.5f);
-
-                            red = base_red + static_cast<int>((255 - base_red) * highlight * red_strength);
-                            green = base_green + static_cast<int>((255 - base_green) * highlight * adjusted_green_strength);
-                            blue = base_blue + static_cast<int>((255 - base_blue) * highlight * blue_strength);
-                        }
+                        red = std::max(0, std::min(255, base_red + offset));
+                        green = std::max(0, std::min(255, base_green + offset));
+                        blue = std::max(0, std::min(255, base_blue + offset));
 
                         pixel_color = (depth == 32)
                             ? makeacol32(red, green, blue, geta32(text_color))
