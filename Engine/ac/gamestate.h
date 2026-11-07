@@ -67,8 +67,10 @@ enum GameStateSvgVersion
     kGSSvgVersion_363       = 3060300,
     kGSSvgVersion_363_02    = 3060302,
     kGSSvgVersion_363_04    = 3060304,
-    kGSSvgVersion_363_13    = 3060313,
-    kGSSvgVersion_Current   = kGSSvgVersion_363_13
+    kGSSvgVersion_363_13 = 3060313,
+    kGSSvgVersion_ViewportShape = 3060314,
+    kGSSvgVersion_ViewportMaskSprite = 3060315,
+    kGSSvgVersion_Current = kGSSvgVersion_ViewportMaskSprite
 };
 
 // A location reference, used to remember where the mouse cursor was.

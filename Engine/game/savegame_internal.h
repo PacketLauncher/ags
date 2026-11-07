@@ -219,6 +219,8 @@ struct RestoredData
         int Height = 0;
         int ZOrder = 0;
         int CamID = -1;
+        int Shape = 0; // Default to rectangular viewport for older savegames
+        int MaskSprite = 0;
     };
     struct CameraData
     {

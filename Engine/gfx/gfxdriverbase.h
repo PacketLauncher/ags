@@ -40,6 +40,20 @@ using Common::PlaneScaling;
 struct SpriteBatchDesc
 {
     uint32_t                 Parent = UINT32_MAX;
+    // Clipping shape for this sprite batch
+    enum ClipShape
+    {
+        kClipRectangle = 0,
+        kClipCircle = 1,
+        kClipSprite = 2
+    };
+
+    ClipShape Shape = kClipRectangle;
+    // Sprite slot used for custom clipping masks
+    int MaskSprite = 0;
+    // Shared graphics texture used for custom sprite clipping.
+    // Keeps the texture alive while the sprite batch is rendered.
+    std::shared_ptr<Texture> MaskTexture;
     // View rectangle for positioning and clipping, in resolution coordinates
     // (this may be screen or game frame resolution, depending on circumstances)
     Rect                     Viewport;
@@ -145,7 +159,8 @@ public:
     //
     // Prepares next sprite batch, a list of sprites with defined viewport and optional
     // global model transformation.
-    void        BeginSpriteBatch(const Rect &viewport, const SpriteTransform &transform, uint32_t filter_flags = 0) override;
+    void        BeginSpriteBatch(const Rect& viewport, const SpriteTransform& transform, uint32_t filter_flags = 0, bool circular = false) override;
+    void        BeginSpriteBatch(const Rect& viewport, const SpriteTransform& transform, uint32_t filter_flags, bool circular, int mask_sprite, bool use_sprite_mask, std::shared_ptr<Texture> mask_texture) override;
     // Begins a sprite batch with defined viewport and a global model transformation
     // and a global flip setting. Optionally provides a surface which should be rendered
     // underneath the rest of the sprites.

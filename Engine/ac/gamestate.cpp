@@ -205,8 +205,9 @@ void GamePlayState::UpdateRoomCameras()
 void GamePlayState::UpdateRoomCamera(int index)
 {
     auto cam = _roomCameras[index];
-    const Rect &rc = cam->GetRect();
+    const Rect& rc = cam->GetRect();
     const Size real_room_sz = Size(data_to_game_coord(thisroom.Width), data_to_game_coord(thisroom.Height));
+
     if ((real_room_sz.Width > rc.GetWidth()) || (real_room_sz.Height > rc.GetHeight()))
     {
         // TODO: split out into Camera Behavior
@@ -214,6 +215,10 @@ void GamePlayState::UpdateRoomCamera(int index)
         {
             int x = data_to_game_coord(playerchar->x) - rc.GetWidth() / 2;
             int y = data_to_game_coord(playerchar->y) - rc.GetHeight() / 2;
+
+            x = Math::Clamp(x, 0, std::max(0, real_room_sz.Width - rc.GetWidth()));
+            y = Math::Clamp(y, 0, std::max(0, real_room_sz.Height - rc.GetHeight()));
+
             cam->SetAt(x, y);
         }
     }

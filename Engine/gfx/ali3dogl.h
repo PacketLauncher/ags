@@ -121,6 +121,8 @@ public:
     OGLTexture *GetTexture() const { return _data.get(); }
     std::shared_ptr<OGLTexture> GetSharedTexture() const { return _data; }
     GLuint GetFbo() const { return _fbo; }
+    GLuint GetStencilBuffer() const { return _stencilBuffer; }
+    void SetStencilBuffer(GLuint stencilBuffer) { _stencilBuffer = stencilBuffer; }
     TextureRenderHint GetRenderHint() const { return _renderHint; }
 
     void SetTexture(std::shared_ptr<OGLTexture> data, GLuint fbo = 0u, TextureRenderHint hint = kTxHint_Normal)
@@ -133,6 +135,8 @@ public:
 private:
     // OpenGL texture data
     std::shared_ptr<OGLTexture> _data;
+    // Optional stencil renderbuffer attached to the framebuffer
+    GLuint _stencilBuffer = 0u;
     // Optional frame buffer object (for rendering onto a texture)
     GLuint _fbo = 0u;
     // Render parameters
@@ -384,8 +388,9 @@ private:
 
     //
     // Specialized shaders
-    bool CreateTransparencyShader(ShaderProgram &prg);
-    bool CreateTintShader(ShaderProgram &prg);
+    bool CreateTransparencyShader(ShaderProgram& prg);
+    bool CreateSpriteMaskShader(ShaderProgram& prg);
+    bool CreateTintShader(ShaderProgram& prg);
     bool CreateLightShader(ShaderProgram &prg);
     bool CreateDarkenByAlphaShader(ShaderProgram &prg);
     bool CreateLightenByAlphaShader(ShaderProgram &prg);
@@ -444,6 +449,12 @@ private:
     void SetScissor(const Rect &clip, bool render_on_texture, const Size &surface_size);
     // Configures rendering mode for the render target, depending on its properties
     void SetRenderTarget(const OGLSpriteBatch *batch, Size &surface_sz, Size &rend_sz, glm::mat4 &projection, bool clear);
+    // Draws a circular shape into the active stencil buffer.
+    void DrawCircularStencilMask(const Rect& rect, const Size& surface_size);
+
+    // Draws a sprite's nontransparent pixels into the active stencil buffer.
+    void DrawSpriteStencilMask(const Rect& rect, const Size& surface_size,
+        const std::shared_ptr<Texture>& mask_texture);
     void RenderSpriteBatches();
     size_t RenderSpriteBatch(const OGLSpriteBatch &batch, size_t from, const glm::mat4 &projection,
                              const Size &rend_sz);
@@ -471,6 +482,7 @@ private:
     POGLFilter _filter{};
 
     ShaderProgram _transparencyShader;
+    ShaderProgram _spriteMaskShader;
     ShaderProgram _tintShader;
     ShaderProgram _lightShader;
     ShaderProgram _darkenbyAlphaShader;

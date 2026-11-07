@@ -3761,6 +3761,14 @@ builtin struct Speech {
 #endif // SCRIPT_API_v330
 
 #ifdef SCRIPT_API_v3507
+enum ViewportShape
+{
+    eViewportRectangle = 0,
+    eViewportCircle = 1,
+    eViewportSprite = 2
+};
+#endif
+#ifdef SCRIPT_API_v3507
 builtin managed struct Camera {
   /// Gets/sets the X position of this camera in the room.
   import attribute int X;
@@ -3799,6 +3807,11 @@ builtin managed struct Viewport {
   import attribute bool Visible;
   /// Gets/sets the Viewport's z-order relative to other viewports.
   import attribute int ZOrder;
+  /// Gets/sets the shape used to clip this viewport.
+  import attribute ViewportShape Shape;
+  /// Gets or sets the sprite slot used as this viewport's custom clipping mask.
+  /// The mask is used when Shape is eViewportSprite.
+  import attribute int MaskSprite;
 
   /// Creates a new Viewport.
   import static Viewport *Create();

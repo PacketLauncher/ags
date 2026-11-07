@@ -306,6 +306,8 @@ void WriteViewportState(const Viewport &view, Stream *out)
         out->WriteInt32(cam->GetID());
     else
         out->WriteInt32(-1);
+    out->WriteInt32(static_cast<int32_t>(view.GetShape()));
+    out->WriteInt32(view.GetMaskSprite());
 }
 
 HSaveError WriteGameState(Stream *out)
@@ -383,7 +385,7 @@ void ReadCameraState(RestoredData &r_data, Stream *in)
     r_data.Cameras.push_back(cam);
 }
 
-void ReadViewportState(RestoredData &r_data, Stream *in)
+void ReadViewportState(RestoredData& r_data, Stream* in, int32_t cmp_ver)
 {
     RestoredData::ViewportData view;
     view.ID = r_data.Viewports.size();
@@ -394,6 +396,12 @@ void ReadViewportState(RestoredData &r_data, Stream *in)
     view.Height = in->ReadInt32();
     view.ZOrder = in->ReadInt32();
     view.CamID = in->ReadInt32();
+    if (cmp_ver >= kGSSvgVersion_ViewportShape)
+        view.Shape = in->ReadInt32();
+
+    if (cmp_ver >= kGSSvgVersion_ViewportMaskSprite)
+        view.MaskSprite = in->ReadInt32();
+
     r_data.Viewports.push_back(view);
 }
 
@@ -454,7 +462,7 @@ HSaveError ReadGameState(Stream *in, int32_t cmp_ver, soff_t cmp_size, const Pre
         for (int i = 0; i < view_count; ++i)
         {
             play.CreateRoomViewport();
-            ReadViewportState(r_data, in);
+            ReadViewportState(r_data, in, cmp_ver);
         }
     }
     return err;
@@ -2061,8 +2069,7 @@ HSaveError ReadComponent(Stream *in, SvgCmpReadHelper &hlp, ComponentInfo &info)
     }
 
     const bool prescan = (hlp.RData.Result.RestoreFlags & kSaveRestore_Prescan) != 0;
-    // no handler when the component is left out of the selection: its data is skipped below
-    auto pfn_read = handler ? (prescan ? handler->Prescan : handler->Unserialize) : nullptr;
+    auto pfn_read = prescan ? handler->Prescan : handler->Unserialize;
 
     // If a handler is chosen, and has Unserialize method, then try reading the data
     if (handler && pfn_read)

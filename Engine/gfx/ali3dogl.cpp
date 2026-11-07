@@ -16,6 +16,7 @@
 #if AGS_HAS_OPENGL
 #include "gfx/ali3dogl.h"
 #include <algorithm>
+#include <cmath>
 #include <stack>
 #include <SDL.h>
 #include "ac/sys_events.h"
@@ -33,6 +34,17 @@
 #include "glm/glm.hpp"
 #include "glm/ext.hpp"
 #include "glad/glad.h"
+#if !AGS_OPENGL_ES2
+#define glGenRenderbuffers glGenRenderbuffersEXT
+#define glBindRenderbuffer glBindRenderbufferEXT
+#define glRenderbufferStorage glRenderbufferStorageEXT
+#define glFramebufferRenderbuffer glFramebufferRenderbufferEXT
+#define glDeleteRenderbuffers glDeleteRenderbuffersEXT
+
+#define GL_RENDERBUFFER GL_RENDERBUFFER_EXT
+#define GL_STENCIL_ATTACHMENT GL_STENCIL_ATTACHMENT_EXT
+#define GL_STENCIL_INDEX8 GL_STENCIL_INDEX8_EXT
+#endif
 
 #if AGS_OPENGL_ES2
 
@@ -96,6 +108,9 @@ size_t OGLTexture::GetMemSize() const
 
 OGLBitmap::~OGLBitmap()
 {
+    if (_stencilBuffer)
+        glDeleteRenderbuffers(1, &_stencilBuffer);
+
     if (_fbo)
         glDeleteFramebuffersEXT(1, &_fbo);
 }
@@ -291,6 +306,8 @@ bool OGLGraphicsDriver::CreateWindowAndGlContext(const DisplayMode &mode)
   // minimum number of bits for the depth buffer
   if (SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0) != 0)
     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Error occured setting attribute SDL_GL_DEPTH_SIZE: %s", SDL_GetError());
+  if (SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8) != 0)
+      SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Error occured setting attribute SDL_GL_STENCIL_SIZE: %s", SDL_GetError());
   if (SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8) != 0 ||
       SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8) != 0 ||
       SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8) != 0)
@@ -411,6 +428,7 @@ bool OGLGraphicsDriver::CreateShaders()
   }
   bool shaders_created = true;
   shaders_created &= CreateTransparencyShader(_transparencyShader);
+  shaders_created &= CreateSpriteMaskShader(_spriteMaskShader);
   shaders_created &= CreateTintShader(_tintShader);
   shaders_created &= CreateLightShader(_lightShader);
   return shaders_created;
@@ -456,6 +474,31 @@ void main()
 {
     vec4 src_col = texture2D(textID, v_TexCoord);
     gl_FragColor = vec4(src_col.xyz, src_col.w * alpha);
+}
+)EOS";
+
+// Fragment shader for sprite-shaped viewport stencil masks.
+// Transparent pixels must not write to the stencil buffer.
+static const auto sprite_mask_fragment_shader_src = ""
+#if AGS_OPENGL_ES2
+"#version 100 \n"
+"precision mediump float; \n"
+#else
+"#version 120 \n"
+#endif
+R"EOS(
+uniform sampler2D textID;
+
+varying vec2 v_TexCoord;
+
+void main()
+{
+    vec4 src_col = texture2D(textID, v_TexCoord);
+
+    if (src_col.a <= 0.0)
+        discard;
+
+    gl_FragColor = vec4(1.0);
 }
 )EOS";
 
@@ -564,6 +607,16 @@ bool OGLGraphicsDriver::CreateTransparencyShader(ShaderProgram &prg)
 {
     if(!CreateShaderProgram(prg, "Transparency", default_vertex_shader_src, transparency_fragment_shader_src))
         return false;
+    AssignBaseShaderArgs(prg);
+    return true;
+}
+
+bool OGLGraphicsDriver::CreateSpriteMaskShader(ShaderProgram& prg)
+{
+    if (!CreateShaderProgram(prg, "Sprite Mask",
+        default_vertex_shader_src, sprite_mask_fragment_shader_src))
+        return false;
+
     AssignBaseShaderArgs(prg);
     return true;
 }
@@ -1191,9 +1244,15 @@ void OGLGraphicsDriver::RenderImpl(bool clearDrawListAfterwards)
     }
 }
 
-void OGLGraphicsDriver::RenderToSurface(BackbufferState *state, bool clearDrawListAfterwards)
+void OGLGraphicsDriver::RenderToSurface(BackbufferState* state, bool clearDrawListAfterwards)
 {
     SetBackbufferState(state, true);
+
+    // Reset stencil clipping before rendering the frame.
+    // Circular viewport masks clear the stencil buffer when needed.
+    glDisable(GL_STENCIL_TEST);
+    glStencilMask(0xFF);
+
     // Save Projection
     _stageMatrixes.Projection = _currentBackbuffer->Projection;
     RenderSpriteBatches();
@@ -1272,11 +1331,201 @@ void OGLGraphicsDriver::SetRenderTarget(const OGLSpriteBatch *batch, Size &surfa
 
     if (clear)
     {
+        glDisable(GL_STENCIL_TEST);
+        glStencilMask(0xFF);
         glDisable(GL_SCISSOR_TEST);
+
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
+        glClearStencil(0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
         glEnable(GL_SCISSOR_TEST);
     }
+}
+
+void OGLGraphicsDriver::DrawCircularStencilMask(const Rect& rect, const Size& surface_size)
+{
+    if (rect.IsEmpty())
+        return;
+
+    constexpr int segments = 128;
+    constexpr float pi = 3.14159265358979323846f;
+
+    const float center_x = (rect.Left + rect.Right + 1) * 0.5f;
+    const float center_y = surface_size.Height -
+        (rect.Top + rect.Bottom + 1) * 0.5f;
+    const float radius = std::min(rect.GetWidth(), rect.GetHeight()) * 0.5f;
+
+    OGLCUSTOMVERTEX vertices[segments + 2] = {};
+
+    vertices[0].position.x = center_x;
+    vertices[0].position.y = center_y;
+
+    for (int i = 0; i <= segments; ++i)
+    {
+        const float angle = (2.0f * pi * i) / segments;
+        vertices[i + 1].position.x = center_x + std::cos(angle) * radius;
+        vertices[i + 1].position.y = center_y + std::sin(angle) * radius;
+    }
+
+    // Save the current viewport and draw the mask in surface coordinates.
+    GLint previous_viewport[4];
+    glGetIntegerv(GL_VIEWPORT, previous_viewport);
+    glViewport(0, 0, surface_size.Width, surface_size.Height);
+
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+
+    glEnable(GL_STENCIL_TEST);
+    glStencilMask(0xFF);
+    glClearStencil(0);
+    glClear(GL_STENCIL_BUFFER_BIT);
+    glStencilFunc(GL_ALWAYS, 1, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+
+    const ShaderProgram& program = _transparencyShader;
+    glUseProgram(program.Program);
+
+    const glm::mat4 projection = glm::ortho(
+        0.0f, static_cast<float>(surface_size.Width),
+        0.0f, static_cast<float>(surface_size.Height),
+        0.0f, 1.0f);
+
+    glUniformMatrix4fv(program.MVPMatrix, 1, GL_FALSE, &projection[0][0]);
+    glUniform1i(program.TextureId, 0);
+    glUniform1f(program.Alpha, 1.0f);
+
+    glVertexAttribPointer(program.A_Position, 2, GL_FLOAT, GL_FALSE,
+        sizeof(OGLCUSTOMVERTEX), &vertices[0].position);
+    glVertexAttribPointer(program.A_TexCoord, 2, GL_FLOAT, GL_FALSE,
+        sizeof(OGLCUSTOMVERTEX), &vertices[0].tu);
+
+    glDrawArrays(GL_TRIANGLE_FAN, 0, segments + 2);
+
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glEnable(GL_BLEND);
+    glEnable(GL_SCISSOR_TEST);
+
+    // Restore the viewport used for normal sprite rendering.
+    glViewport(previous_viewport[0], previous_viewport[1],
+        previous_viewport[2], previous_viewport[3]);
+
+    glStencilMask(0x00);
+    glStencilFunc(GL_EQUAL, 1, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+}
+
+void OGLGraphicsDriver::DrawSpriteStencilMask(
+    const Rect& rect, const Size& surface_size,
+    const std::shared_ptr<Texture>& mask_texture)
+{
+    if (rect.IsEmpty() || !mask_texture)
+        return;
+
+    const auto texture = std::static_pointer_cast<OGLTexture>(mask_texture);
+
+    if (!texture || texture->_numTiles == 0)
+        return;
+
+    const int tex_width = texture->Res.Width;
+    const int tex_height = texture->Res.Height;
+
+    if (tex_width <= 0 || tex_height <= 0)
+        return;
+
+    GLint previous_viewport[4];
+    glGetIntegerv(GL_VIEWPORT, previous_viewport);
+
+    glViewport(0, 0, surface_size.Width, surface_size.Height);
+
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+
+    glEnable(GL_STENCIL_TEST);
+    glStencilMask(0xFF);
+    glClearStencil(0);
+    glClear(GL_STENCIL_BUFFER_BIT);
+    glStencilFunc(GL_ALWAYS, 1, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+
+    const ShaderProgram& program = _spriteMaskShader;
+    glUseProgram(program.Program);
+
+    const glm::mat4 projection = glm::ortho(
+        0.0f, static_cast<float>(surface_size.Width),
+        0.0f, static_cast<float>(surface_size.Height),
+        0.0f, 1.0f);
+
+    glUniformMatrix4fv(program.MVPMatrix, 1, GL_FALSE,
+        glm::value_ptr(projection));
+    glUniform1i(program.TextureId, 0);
+
+    const float scale_x = static_cast<float>(rect.GetWidth()) / tex_width;
+    const float scale_y = static_cast<float>(rect.GetHeight()) / tex_height;
+
+    for (size_t i = 0; i < texture->_numTiles; ++i)
+    {
+        const auto& tile = texture->_tiles[i];
+
+        const float left = rect.Left + tile.x * scale_x;
+        const float right = left + tile.width * scale_x;
+        const float top = surface_size.Height -
+            (rect.Top + tile.y * scale_y);
+        const float bottom = top - tile.height * scale_y;
+
+        const float u = static_cast<float>(tile.width) / tile.allocWidth;
+        const float v = static_cast<float>(tile.height) / tile.allocHeight;
+
+        OGLCUSTOMVERTEX vertices[4] = {};
+
+        vertices[0].position = { left, top };
+        vertices[0].tu = 0.0f;
+        vertices[0].tv = 0.0f;
+
+        vertices[1].position = { right, top };
+        vertices[1].tu = u;
+        vertices[1].tv = 0.0f;
+
+        vertices[2].position = { left, bottom };
+        vertices[2].tu = 0.0f;
+        vertices[2].tv = v;
+
+        vertices[3].position = { right, bottom };
+        vertices[3].tu = u;
+        vertices[3].tv = v;
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, tile.texture);
+
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+        glVertexAttribPointer(program.A_Position, 2, GL_FLOAT,
+            GL_FALSE, sizeof(OGLCUSTOMVERTEX),
+            &vertices[0].position);
+
+        glVertexAttribPointer(program.A_TexCoord, 2, GL_FLOAT,
+            GL_FALSE, sizeof(OGLCUSTOMVERTEX),
+            &vertices[0].tu);
+
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+
+    glUseProgram(0);
+
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glEnable(GL_BLEND);
+    glEnable(GL_SCISSOR_TEST);
+
+    glViewport(previous_viewport[0], previous_viewport[1],
+        previous_viewport[2], previous_viewport[3]);
+
+    glStencilMask(0x00);
+    glStencilFunc(GL_EQUAL, 1, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
 }
 
 void OGLGraphicsDriver::RenderSpriteBatches()
@@ -1308,6 +1557,10 @@ void OGLGraphicsDriver::RenderSpriteBatches()
     Size rend_sz = _currentBackbuffer->RendSize;
     glm::mat4 use_projection = _currentBackbuffer->Projection;
 
+    // Track the circular stencil mask currently stored in the framebuffer.
+    uint32_t active_circle_batch = UINT32_MAX;
+    unsigned active_circle_target = UINT32_MAX;
+
     const size_t last_batch_to_rend = _spriteBatchDesc.size() - 1;
     for (size_t cur_bat = 0u, last_bat = 0u, cur_spr = 0u; last_bat <= last_batch_to_rend;)
     {
@@ -1334,6 +1587,10 @@ void OGLGraphicsDriver::RenderSpriteBatches()
             {
                 cur_rt = (rt_parent.Fbo > 0u) ? rt_parent.Fbo : back_buffer;
                 SetRenderTarget(&rt_parent, surface_sz, rend_sz, use_projection, new_batch);
+
+                // Switching render targets invalidates the cached stencil mask.
+                active_circle_batch = UINT32_MAX;
+                active_circle_target = UINT32_MAX;
             }
         }
 
@@ -1341,8 +1598,78 @@ void OGLGraphicsDriver::RenderSpriteBatches()
         // we know that the batch has sprites, if next sprite in list belongs to it ("node" ref)
         if ((cur_spr < _spriteList.size()) && (cur_bat == _spriteList[cur_spr].node))
         {
+            // Find whether this batch belongs to a circular or sprite-shaped viewport.
+            bool circular_clip = false;
+            bool sprite_clip = false;
+            Rect circle_rect;
+            Rect sprite_mask_rect;
+            std::shared_ptr<Texture> sprite_mask_texture;
+            uint32_t clip_batch = static_cast<uint32_t>(cur_bat);
+
+            while (clip_batch != UINT32_MAX)
+            {
+                const auto& clip_desc = _spriteBatchDesc[clip_batch];
+
+                if (clip_desc.Shape == SpriteBatchDesc::kClipCircle)
+                {
+                    circular_clip = true;
+                    circle_rect = _spriteBatches[clip_batch].Viewport;
+                    break;
+                }
+                else if (clip_desc.Shape == SpriteBatchDesc::kClipSprite)
+                {
+                    sprite_clip = true;
+                    sprite_mask_rect = _spriteBatches[clip_batch].Viewport;
+                    sprite_mask_texture = clip_desc.MaskTexture;
+                    break;
+                }
+
+                clip_batch = _spriteBatchDesc[clip_batch].Parent;
+            }
+
             // Now set clip (scissor), and render sprites
             SetScissor(batch.Viewport, (cur_rt != back_buffer), surface_sz);
+
+            // Apply circular or sprite-shaped clipping on the backbuffer.
+            if ((circular_clip || sprite_clip) && cur_rt == back_buffer)
+            {
+                // Rebuild the stencil mask when the clipping viewport
+                // or its render target changes.
+                if (active_circle_batch != clip_batch ||
+                    active_circle_target != cur_rt)
+                {
+                    if (circular_clip)
+                    {
+                        const Rect mask_rect = _currentBackbuffer->Scaling.ScaleRange(circle_rect);
+                        DrawCircularStencilMask(mask_rect, surface_sz);
+                    }
+                    else
+                    {
+                        const Rect mask_rect = _currentBackbuffer->Scaling.ScaleRange(sprite_mask_rect);
+                        DrawSpriteStencilMask(mask_rect, surface_sz, sprite_mask_texture);
+                    }
+
+                    active_circle_batch = clip_batch;
+                    active_circle_target = cur_rt;
+                }
+
+                glEnable(GL_STENCIL_TEST);
+                glStencilMask(0x00);
+                glStencilFunc(GL_EQUAL, 1, 0xFF);
+                glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+            }
+            else
+            {
+                glDisable(GL_STENCIL_TEST);
+
+                // A different render target may have invalidated the mask.
+                if (cur_rt != back_buffer)
+                {
+                    active_circle_batch = UINT32_MAX;
+                    active_circle_target = UINT32_MAX;
+                }
+            }
+
             _stageMatrixes.World = batch.Matrix;
             _rendSpriteBatch = batch.ID;
             cur_spr = RenderSpriteBatch(batch, cur_spr, use_projection, rend_sz);
@@ -1373,6 +1700,7 @@ void OGLGraphicsDriver::RenderSpriteBatches()
     SetRenderTarget(nullptr, surface_sz, rend_sz, use_projection, false);
     _rendSpriteBatch = UINT32_MAX;
     _stageMatrixes.World = _spriteBatches[0].Matrix;
+    glDisable(GL_STENCIL_TEST);
     glDisable(GL_SCISSOR_TEST);
 }
 
@@ -1464,7 +1792,12 @@ void OGLGraphicsDriver::InitSpriteBatch(size_t index, const SpriteBatchDesc &des
         if (!viewport.IsEmpty())
         {
             viewport = glmex::full_transform(viewport, parent.ViewportMat);
-            viewport = ClampToRect(parent.Viewport, viewport);
+
+            // Preserve the complete rectangle for circular and sprite-shaped
+            // viewports. Their stencil masks will handle clipping.
+            if (desc.Shape != SpriteBatchDesc::kClipCircle &&
+                desc.Shape != SpriteBatchDesc::kClipSprite)
+                viewport = ClampToRect(parent.Viewport, viewport);
         }
         else
         {
@@ -1787,15 +2120,31 @@ IDriverDependantBitmap* OGLGraphicsDriver::CreateRenderTargetDDB(int width, int 
     // FIXME: this ugly accessing internal texture members
     unsigned int tex = txdata->_tiles[0].texture;
     glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, tex, 0);
+
+    // Create an 8-bit stencil renderbuffer for circular viewport clipping.
+    GLuint stencilBuffer = 0u;
+    glGenRenderbuffers(1, &stencilBuffer);
+    glBindRenderbuffer(GL_RENDERBUFFER, stencilBuffer);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_STENCIL_INDEX8, width, height);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER_EXT, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, stencilBuffer);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
     GLenum status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
     if (status != GL_FRAMEBUFFER_COMPLETE_EXT)
     {
-        throw Ali3DException(String::FromFormat("CreateRenderTargetDDB: failed to create a framebuffer: %x", status));
+        // Restore the framebuffer binding and release allocated resources.
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, _screenFramebuffer);
+        glDeleteRenderbuffers(1, &stencilBuffer);
+        glDeleteFramebuffersEXT(1, &fbo);
+
+        throw Ali3DException(String::FromFormat(
+            "CreateRenderTargetDDB: failed to create a framebuffer: %x", status));
     }
     glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, _screenFramebuffer);
 
-    OGLBitmap *ddb = new OGLBitmap(width, height, color_depth, txflags);
+    OGLBitmap* ddb = new OGLBitmap(width, height, color_depth, txflags);
     ddb->SetTexture(txdata, fbo, kTxHint_PremulAlpha);
+    ddb->SetStencilBuffer(stencilBuffer);
     return ddb;
 }
 

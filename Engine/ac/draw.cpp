@@ -2782,6 +2782,23 @@ static void construct_room_view()
 
         const Rect &view_rc = viewport->GetRect();
         const Rect &cam_rc = camera->GetRect();
+        const ViewportShape viewport_shape = viewport->GetShape();
+        const int mask_sprite = viewport->GetMaskSprite();
+        const bool circular_viewport = (viewport_shape == kViewportShapeCircle);
+        const bool sprite_viewport = (viewport_shape == kViewportShapeSprite);
+
+        // Retrieve and retain the viewport mask texture.
+        std::shared_ptr<Texture> mask_texture;
+
+        if (sprite_viewport && mask_sprite >= 0 &&
+            spriteset.DoesSpriteExist(mask_sprite))
+        {
+            const bool has_alpha = (static_cast<size_t>(mask_sprite) < game.SpriteInfos.size()) ?
+                ((game.SpriteInfos[mask_sprite].Flags & SPF_ALPHACHANNEL) != 0) : false;
+
+            mask_texture = texturecache.GetOrLoad(mask_sprite, nullptr, has_alpha, false);
+        }
+
         const float view_sx = (float)view_rc.GetWidth() / (float)cam_rc.GetWidth();
         const float view_sy = (float)view_rc.GetHeight() / (float)cam_rc.GetHeight();
         const SpriteTransform view_trans(view_rc.Left, view_rc.Top, view_sx, view_sy);
@@ -2793,7 +2810,7 @@ static void construct_room_view()
             // viewport-camera pair is done as 2 nested scene nodes,
             // where first defines how camera's image translates into the viewport on screen,
             // and second - how room's image translates into the camera.
-            gfxDriver->BeginSpriteBatch(view_rc, view_trans, RENDER_BATCH_ROOM_LAYER);
+            gfxDriver->BeginSpriteBatch(view_rc, view_trans, RENDER_BATCH_ROOM_LAYER, circular_viewport, mask_sprite, sprite_viewport, mask_texture);
             gfxDriver->BeginSpriteBatch(Rect(), cam_trans);
             gfxDriver->SetStageScreen(cam_rc.GetSize(), cam_rc.Left, cam_rc.Top);
             put_sprite_list_on_screen(true);
@@ -2805,7 +2822,7 @@ static void construct_room_view()
             // For software renderer - combine viewport and camera in one batch,
             // due to how the room drawing is implemented currently in the software mode.
             // TODO: review this later?
-            gfxDriver->BeginSpriteBatch(view_rc, view_trans, RENDER_BATCH_ROOM_LAYER);
+            gfxDriver->BeginSpriteBatch(view_rc, view_trans, RENDER_BATCH_ROOM_LAYER, circular_viewport, mask_sprite, sprite_viewport, mask_texture);
 
             if (CameraDrawData[viewport->GetID()].Frame == nullptr && CameraDrawData[viewport->GetID()].IsOverlap)
             { // room background is prepended to the sprite stack

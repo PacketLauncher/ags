@@ -413,12 +413,12 @@ private:
     // TODO: find a good way to merge with SetRenderTarget
     void SetRenderTarget(const D3DSpriteBatch *batch, Size &surface_sz, bool clear);
     void RenderSpriteBatches();
-    size_t RenderSpriteBatch(const D3DSpriteBatch &batch, size_t from, const Size &rend_sz);
+    size_t RenderSpriteBatch(const D3DSpriteBatch& batch, size_t from, const Size& rend_sz);
     void RenderSprite(const D3DDrawListEntry *entry, const glm::mat4 &matGlobal,
                       const SpriteColorTransform &color, const Size &rend_sz);
     // Renders given texture onto the current render target
-    void RenderTexture(D3DBitmap *bitmap, int draw_x, int draw_y, const glm::mat4 &matGlobal,
-                       const SpriteColorTransform &color, const Size &rend_sz);
+    void RenderTexture(D3DBitmap* bitmap, int draw_x, int draw_y, const glm::mat4& matGlobal,
+        const SpriteColorTransform& color, const Size& rend_sz);
 
     // Sets uniform blend settings, same for both RGB and alpha component
     void SetBlendOpUniform(D3DBLENDOP blend_op, D3DBLEND src_factor, D3DBLEND dst_factor);

@@ -89,9 +89,22 @@ bool GraphicsDriverBase::GetVsync() const
     return _mode.Vsync;
 }
 
-void GraphicsDriverBase::BeginSpriteBatch(const Rect &viewport, const SpriteTransform &transform, uint32_t filter_flags)
+void GraphicsDriverBase::BeginSpriteBatch(const Rect& viewport, const SpriteTransform& transform, uint32_t filter_flags, bool circular)
 {
-    BeginSpriteBatch(SpriteBatchDesc(_actSpriteBatch, viewport, transform, kFlip_None, nullptr, filter_flags));
+    BeginSpriteBatch(viewport, transform, filter_flags, circular, 0, false, nullptr);
+}
+
+void GraphicsDriverBase::BeginSpriteBatch(const Rect& viewport, const SpriteTransform& transform, uint32_t filter_flags, bool circular, int mask_sprite, bool use_sprite_mask, std::shared_ptr<Texture> mask_texture)
+{
+    SpriteBatchDesc desc(_actSpriteBatch, viewport, transform, kFlip_None, nullptr, filter_flags);
+
+    desc.Shape = use_sprite_mask ? SpriteBatchDesc::kClipSprite :
+        (circular ? SpriteBatchDesc::kClipCircle : SpriteBatchDesc::kClipRectangle);
+
+    desc.MaskSprite = mask_sprite;
+    desc.MaskTexture = std::move(mask_texture);
+
+    BeginSpriteBatch(desc);
 }
 
 void GraphicsDriverBase::BeginSpriteBatch(const Rect &viewport, const SpriteTransform &transform,

@@ -21,11 +21,13 @@
 #include "ac/dynobj/scriptuserobject.h"
 #include "ac/draw.h"
 #include "ac/gamestate.h"
+#include "ac/gamesetupstruct.h"
 #include "debug/debug_log.h"
 #include "script/script_api.h"
 #include "script/script_runtime.h"
 
 using namespace AGS::Common;
+extern GameSetupStruct game;
 
 //=============================================================================
 //
@@ -343,6 +345,47 @@ void Viewport_SetZOrder(ScriptViewport *scv, int zorder)
     play.InvalidateViewportZOrder();
 }
 
+int Viewport_GetShape(ScriptViewport* scv)
+{
+    if (scv->GetID() < 0) { debug_script_warn("Viewport.Shape: trying to use deleted viewport"); return 0; }
+    return static_cast<int>(play.GetRoomViewport(scv->GetID())->GetShape());
+}
+
+void Viewport_SetShape(ScriptViewport* scv, int shape)
+{
+    if (scv->GetID() < 0) { debug_script_warn("Viewport.Shape: trying to use deleted viewport"); return; }
+    if (shape < kViewportShapeRectangle || shape > kViewportShapeSprite)
+    {
+        debug_script_warn("Viewport.Shape: invalid shape %d", shape);
+        return;
+    }
+    play.GetRoomViewport(scv->GetID())->SetShape(static_cast<ViewportShape>(shape));
+}
+
+int Viewport_GetMaskSprite(ScriptViewport* scv)
+{
+    if (scv->GetID() < 0) { debug_script_warn("Viewport.MaskSprite: trying to use deleted viewport"); return 0; }
+    return play.GetRoomViewport(scv->GetID())->GetMaskSprite();
+}
+
+void Viewport_SetMaskSprite(ScriptViewport* scv, int sprite)
+{
+    if (scv->GetID() < 0) { debug_script_warn("Viewport.MaskSprite: trying to use deleted viewport"); return; }
+
+    auto view = play.GetRoomViewport(scv->GetID());
+    view->SetMaskSprite(sprite);
+
+    if (sprite >= 0 && static_cast<size_t>(sprite) < game.SpriteInfos.size())
+    {
+        const auto& info = game.SpriteInfos[sprite];
+
+        if (info.Width > 0 && info.Height > 0)
+        {
+            view->SetSize(Size(info.Width, info.Height));
+        }
+    }
+}
+
 ScriptViewport* Viewport_GetAtScreenXY(int x, int y)
 {
     data_to_game_coords(&x, &y);
@@ -465,6 +508,26 @@ RuntimeScriptValue Sc_Viewport_SetZOrder(void *self, const RuntimeScriptValue *p
     API_OBJCALL_VOID_PINT(ScriptViewport, Viewport_SetZOrder);
 }
 
+RuntimeScriptValue Sc_Viewport_GetShape(void* self, const RuntimeScriptValue* params, int32_t param_count)
+{
+    API_OBJCALL_INT(ScriptViewport, Viewport_GetShape);
+}
+
+RuntimeScriptValue Sc_Viewport_SetShape(void* self, const RuntimeScriptValue* params, int32_t param_count)
+{
+    API_OBJCALL_VOID_PINT(ScriptViewport, Viewport_SetShape);
+}
+
+RuntimeScriptValue Sc_Viewport_GetMaskSprite(void* self, const RuntimeScriptValue* params, int32_t param_count)
+{
+    API_OBJCALL_INT(ScriptViewport, Viewport_GetMaskSprite);
+}
+
+RuntimeScriptValue Sc_Viewport_SetMaskSprite(void* self, const RuntimeScriptValue* params, int32_t param_count)
+{
+    API_OBJCALL_VOID_PINT(ScriptViewport, Viewport_SetMaskSprite);
+}
+
 RuntimeScriptValue Sc_Viewport_GetAtScreenXY(const RuntimeScriptValue *params, int32_t param_count)
 {
     API_SCALL_OBJAUTO_PINT2(ScriptViewport, Viewport_GetAtScreenXY);
@@ -525,6 +588,10 @@ void RegisterViewportAPI()
         { "Viewport::set_Visible",      API_FN_PAIR(Viewport_SetVisible) },
         { "Viewport::get_ZOrder",       API_FN_PAIR(Viewport_GetZOrder) },
         { "Viewport::set_ZOrder",       API_FN_PAIR(Viewport_SetZOrder) },
+        { "Viewport::get_Shape",        API_FN_PAIR(Viewport_GetShape) },
+        { "Viewport::set_Shape",        API_FN_PAIR(Viewport_SetShape) },
+        { "Viewport::get_MaskSprite",   API_FN_PAIR(Viewport_GetMaskSprite) },
+        { "Viewport::set_MaskSprite",   API_FN_PAIR(Viewport_SetMaskSprite) },
         { "Viewport::GetAtScreenXY",    API_FN_PAIR(Viewport_GetAtScreenXY) },
         { "Viewport::SetPosition",      API_FN_PAIR(Viewport_SetPosition) },
         { "Viewport::ScreenToRoomPoint", API_FN_PAIR(Viewport_ScreenToRoomPoint) },

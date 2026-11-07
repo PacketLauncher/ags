@@ -18,6 +18,7 @@
 
 #include "platform/windows/gfx/ali3dd3d.h"
 #include <algorithm>
+#include <cmath>
 #include <stack>
 #include <SDL.h>
 #include <glm/ext.hpp>
@@ -503,7 +504,8 @@ bool D3DGraphicsDriver::CreateDisplayMode(const DisplayMode &mode)
   d3dpp.SwapEffect = D3DSWAPEFFECT_COPY; //D3DSWAPEFFECT_DISCARD; 
   d3dpp.hDeviceWindow = hwnd;
   d3dpp.Windowed = mode.IsRealFullscreen() ? FALSE : TRUE;
-  d3dpp.EnableAutoDepthStencil = FALSE;
+  d3dpp.EnableAutoDepthStencil = TRUE;
+  d3dpp.AutoDepthStencilFormat = D3DFMT_D24S8;
   d3dpp.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER; // we need this flag to access the backbuffer with lockrect
   d3dpp.FullScreen_RefreshRateInHz = D3DPRESENT_RATE_DEFAULT;
   if (mode.Vsync)
@@ -788,11 +790,11 @@ HRESULT D3DGraphicsDriver::ResetD3DDevice()
 void D3DGraphicsDriver::ReleaseRenderTargetData()
 {
     // Remove RT surface ref from all the existing batches
-    for (auto &batch : _spriteBatches)
+    for (auto& batch : _spriteBatches)
     {
         batch.RenderSurface = nullptr;
     }
-    for (auto &batch : _backupBatches)
+    for (auto& batch : _backupBatches)
     {
         batch.RenderSurface = nullptr;
     }
@@ -1052,8 +1054,8 @@ void D3DGraphicsDriver::RenderSprite(const D3DDrawListEntry *drawListEntry, cons
     RenderTexture(drawListEntry->ddb, drawListEntry->x, drawListEntry->y, matGlobal, color, rend_sz);
 }
 
-void D3DGraphicsDriver::RenderTexture(D3DBitmap *bmpToDraw, int draw_x, int draw_y,
-    const glm::mat4 &matGlobal, const SpriteColorTransform &color, const Size &rend_sz)
+void D3DGraphicsDriver::RenderTexture(D3DBitmap* bmpToDraw, int draw_x, int draw_y,
+    const glm::mat4& matGlobal, const SpriteColorTransform& color, const Size& rend_sz)
 {
   HRESULT hr;
 
@@ -1129,7 +1131,7 @@ void D3DGraphicsDriver::RenderTexture(D3DBitmap *bmpToDraw, int draw_x, int draw
     }
   }
 
-  const auto *txdata = bmpToDraw->GetTexture();
+  const auto* txdata = bmpToDraw->GetTexture();
   if (txdata->_vertex == nullptr)
   {
     hr = direct3ddevice->SetStreamSource(0, vertexbuffer.get(), 0, sizeof(CUSTOMVERTEX));
@@ -1263,6 +1265,33 @@ void D3DGraphicsDriver::RenderToSurface(BackbufferState *state, bool clearDrawLi
 {
     SetBackbufferState(state, true);
 
+    // Create a depth/stencil surface matching the current render target.
+    D3DSurfacePtr previous_depth_stencil;
+    direct3ddevice->GetDepthStencilSurface(previous_depth_stencil.Acquire());
+
+    D3DSurfacePtr viewport_depth_stencil;
+    HRESULT stencil_hr = direct3ddevice->CreateDepthStencilSurface(
+        state->SurfSize.Width,
+        state->SurfSize.Height,
+        D3DFMT_D24S8,
+        D3DMULTISAMPLE_NONE,
+        0,
+        TRUE,
+        viewport_depth_stencil.Acquire(),
+        NULL);
+
+    if (FAILED(stencil_hr))
+    {
+        throw Ali3DException("Failed to create viewport depth/stencil surface");
+    }
+
+    stencil_hr = direct3ddevice->SetDepthStencilSurface(viewport_depth_stencil.get());
+
+    if (FAILED(stencil_hr))
+    {
+        throw Ali3DException("Failed to activate viewport depth/stencil surface");
+    }
+
     // if showing at 2x size, the sprite can get distorted otherwise
     direct3ddevice->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
     direct3ddevice->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
@@ -1273,9 +1302,15 @@ void D3DGraphicsDriver::RenderToSurface(BackbufferState *state, bool clearDrawLi
         throw Ali3DException("IDirect3DDevice9::BeginScene failed");
     }
 
+    // Clear the stencil buffer before rendering the viewport masks.
+    direct3ddevice->Clear(0, NULL, D3DCLEAR_STENCIL, 0, 1.0f, 0);
+
     RenderSpriteBatches();
 
     direct3ddevice->EndScene();
+
+    // Restore the previous depth/stencil surface.
+    direct3ddevice->SetDepthStencilSurface(previous_depth_stencil.get());
 
     if (clearDrawListAfterwards)
     {
@@ -1334,11 +1369,14 @@ void D3DGraphicsDriver::SetRenderTarget(const D3DSpriteBatch *batch, Size &rend_
 {
     if (batch && batch->RenderTarget)
     {
-        // Assign an arbitrary render target, and setup render params
+        D3DBitmap* target = static_cast<D3DBitmap*>(batch->RenderTarget);
+
         HRESULT hr = direct3ddevice->SetRenderTarget(0, batch->RenderSurface.get());
         assert(hr == D3D_OK);
-        Size surface_sz = Size(batch->RenderTarget->GetWidth(), batch->RenderTarget->GetHeight());
+
+        Size surface_sz = Size(target->GetWidth(), target->GetHeight());
         rend_sz = surface_sz;
+
         SetD3DViewport(RectWH(surface_sz));
         glm::mat4 mat_ortho = glmex::ortho_d3d(surface_sz.Width, surface_sz.Height);
         direct3ddevice->SetTransform(D3DTS_PROJECTION, (D3DMATRIX*)glm::value_ptr(mat_ortho));
@@ -1363,6 +1401,158 @@ void D3DGraphicsDriver::SetRenderTarget(const D3DSpriteBatch *batch, Size &rend_
     {
         direct3ddevice->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_RGBA(0, 0, 0, 0), 0.5f, 0);
     }
+}
+
+// Draw a circular mask into the stencil buffer without modifying color pixels.
+static void DrawCircularStencilMask(IDirect3DDevice9* device, const Rect& rect)
+{
+    struct MaskVertex
+    {
+        float x, y, z, rhw;
+    };
+
+    constexpr int segments = 128;
+    constexpr float pi = 3.14159265358979323846f;
+
+    const float cx = (rect.Left + rect.Right + 1) * 0.5f;
+    const float cy = (rect.Top + rect.Bottom + 1) * 0.5f;
+    const float radius = std::min(rect.GetWidth(), rect.GetHeight()) * 0.5f;
+
+    MaskVertex vertices[segments * 3];
+
+    for (int i = 0; i < segments; ++i)
+    {
+        const float a0 = 2.0f * pi * i / segments;
+        const float a1 = 2.0f * pi * (i + 1) / segments;
+
+        vertices[i * 3] = { cx, cy, 0.0f, 1.0f };
+        vertices[i * 3 + 1] = {
+            cx + std::cos(a0) * radius,
+            cy + std::sin(a0) * radius,
+            0.0f, 1.0f
+        };
+        vertices[i * 3 + 2] = {
+            cx + std::cos(a1) * radius,
+            cy + std::sin(a1) * radius,
+            0.0f, 1.0f
+        };
+    }
+
+    // Preserve the existing rendering state.
+    IDirect3DStateBlock9* state = nullptr;
+    if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &state)))
+        throw Ali3DException("Failed to create circular stencil state block");
+
+    device->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+    device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+    device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    device->SetRenderState(D3DRS_ZENABLE, FALSE);
+    device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+
+    device->SetRenderState(D3DRS_STENCILENABLE, TRUE);
+    device->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_ALWAYS);
+    device->SetRenderState(D3DRS_STENCILREF, 1);
+    device->SetRenderState(D3DRS_STENCILMASK, 0xFF);
+    device->SetRenderState(D3DRS_STENCILWRITEMASK, 0xFF);
+    device->SetRenderState(D3DRS_STENCILFAIL, D3DSTENCILOP_KEEP);
+    device->SetRenderState(D3DRS_STENCILZFAIL, D3DSTENCILOP_KEEP);
+    device->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_REPLACE);
+
+    device->SetPixelShader(nullptr);
+    device->SetVertexShader(nullptr);
+    device->SetTexture(0, nullptr);
+    device->SetFVF(D3DFVF_XYZRHW);
+
+    const HRESULT hr = device->DrawPrimitiveUP(
+        D3DPT_TRIANGLELIST,
+        segments,
+        vertices,
+        sizeof(MaskVertex));
+
+    state->Apply();
+    state->Release();
+
+    if (FAILED(hr))
+        throw Ali3DException("Failed to draw circular stencil mask");
+}
+
+
+// Draw a sprite's non-transparent pixels into the stencil buffer.
+static void DrawSpriteStencilMask(
+    IDirect3DDevice9* device,
+    IDirect3DTexture9* texture,
+    const Rect& rect)
+{
+    if (!texture || rect.IsEmpty())
+        return;
+
+    struct MaskVertex
+    {
+        float x, y, z, rhw;
+        float u, v;
+    };
+
+    const float left = static_cast<float>(rect.Left) - 0.5f;
+    const float top = static_cast<float>(rect.Top) - 0.5f;
+    const float right = static_cast<float>(rect.Right + 1) - 0.5f;
+    const float bottom = static_cast<float>(rect.Bottom + 1) - 0.5f;
+
+    const MaskVertex vertices[4] =
+    {
+        { left,  top,    0.0f, 1.0f, 0.0f, 0.0f },
+        { right, top,    0.0f, 1.0f, 1.0f, 0.0f },
+        { left,  bottom, 0.0f, 1.0f, 0.0f, 1.0f },
+        { right, bottom, 0.0f, 1.0f, 1.0f, 1.0f }
+    };
+
+    IDirect3DStateBlock9* state = nullptr;
+    if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &state)))
+        throw Ali3DException("Failed to create sprite stencil state block");
+
+    device->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+    device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    device->SetRenderState(D3DRS_ALPHATESTENABLE, TRUE);
+    device->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_GREATER);
+    device->SetRenderState(D3DRS_ALPHAREF, 0);
+    device->SetRenderState(D3DRS_ZENABLE, FALSE);
+    device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+
+    device->SetRenderState(D3DRS_STENCILENABLE, TRUE);
+    device->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_ALWAYS);
+    device->SetRenderState(D3DRS_STENCILREF, 1);
+    device->SetRenderState(D3DRS_STENCILMASK, 0xFF);
+    device->SetRenderState(D3DRS_STENCILWRITEMASK, 0xFF);
+    device->SetRenderState(D3DRS_STENCILFAIL, D3DSTENCILOP_KEEP);
+    device->SetRenderState(D3DRS_STENCILZFAIL, D3DSTENCILOP_KEEP);
+    device->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_REPLACE);
+
+    device->SetPixelShader(nullptr);
+    device->SetVertexShader(nullptr);
+    device->SetTexture(0, texture);
+    device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    device->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    device->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+
+    device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+
+    device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+
+    const HRESULT hr = device->DrawPrimitiveUP(
+        D3DPT_TRIANGLESTRIP, 2, vertices, sizeof(MaskVertex));
+
+    state->Apply();
+    state->Release();
+
+    if (FAILED(hr))
+        throw Ali3DException("Failed to draw sprite stencil mask");
 }
 
 void D3DGraphicsDriver::RenderSpriteBatches()
@@ -1392,6 +1582,9 @@ void D3DGraphicsDriver::RenderSpriteBatches()
     assert(back_buffer);
     IDirect3DSurface9 *cur_rt = back_buffer; // current render target
     Size rend_sz = _currentBackbuffer->RendSize; // current rt surface size
+    // Track the circular stencil mask currently stored in the buffer.
+    uint32_t active_circle_batch = UINT32_MAX;
+    IDirect3DSurface9* active_circle_target = nullptr;
 
     const size_t last_batch_to_rend = _spriteBatchDesc.size() - 1;
     for (size_t cur_bat = 0u, last_bat = 0u, cur_spr = 0u; last_bat <= last_batch_to_rend;)
@@ -1414,11 +1607,20 @@ void D3DGraphicsDriver::RenderSpriteBatches()
         {
             // If render target is different in this batch, then set it up
             const auto &rt_parent = _spriteBatches[rt_parents.top()];
-            if (rt_parent.RenderSurface && (cur_rt != rt_parent.RenderSurface.get()) ||
-                !rt_parent.RenderSurface && (cur_rt != back_buffer))
+            IDirect3DSurface9* target_surface =
+                rt_parent.RenderSurface ? rt_parent.RenderSurface.get() : back_buffer;
+
+            if (cur_rt != target_surface)
             {
-                cur_rt = rt_parent.RenderSurface ? rt_parent.RenderSurface.get() : back_buffer;
+                cur_rt = target_surface;
+
+                // Clear the render target only when first entering its batch.
+                // Preserve previously rendered contents when returning from nested batches.
                 SetRenderTarget(&rt_parent, rend_sz, new_batch);
+
+                // Reset clipping masks when switching render targets.
+                active_circle_batch = UINT32_MAX;
+                active_circle_target = nullptr;
             }
         }
 
@@ -1426,10 +1628,93 @@ void D3DGraphicsDriver::RenderSpriteBatches()
         // we know that the batch has sprites, if next sprite in list belongs to it ("node" ref)
         if ((cur_spr < _spriteList.size()) && (cur_bat == _spriteList[cur_spr].node))
         {
-            // Now set clip (scissor), and render sprites
+            // Find the circular or sprite-shaped viewport in this batch's parent hierarchy.
+            bool circular_clip = false;
+            bool sprite_clip = false;
+            int mask_sprite = 0;
+            Rect circle_rect;
+            Rect sprite_mask_rect;
+            std::shared_ptr<D3DTexture> sprite_mask_texture;
+            uint32_t clip_batch = static_cast<uint32_t>(cur_bat);
+
+            while (clip_batch != UINT32_MAX)
+            {
+                const auto& clip_desc = _spriteBatchDesc[clip_batch];
+
+                if (clip_desc.Shape == SpriteBatchDesc::kClipCircle)
+                {
+                    circular_clip = true;
+                    circle_rect = _spriteBatches[clip_batch].Viewport;
+                    break;
+                }
+                else if (clip_desc.Shape == SpriteBatchDesc::kClipSprite)
+                {
+                    sprite_clip = true;
+                    mask_sprite = clip_desc.MaskSprite;
+                    sprite_mask_rect = _spriteBatches[clip_batch].Viewport;
+                    sprite_mask_texture = std::static_pointer_cast<D3DTexture>(clip_desc.MaskTexture);
+
+                    break;
+                }
+
+                clip_batch = clip_desc.Parent;
+            }
+
+            // Set the rectangular clipping area.
             SetScissor(batch.Viewport, (cur_rt != back_buffer));
+
+            if ((circular_clip || sprite_clip) && (cur_rt == back_buffer))
+            {
+                // Convert the circular viewport to render-target coordinates.
+                const Rect mask_rect =
+                    _currentBackbuffer->Scaling.ScaleRange(circle_rect);
+
+                // Reuse the existing stencil mask if it belongs to this viewport
+                // and the render target has not changed.
+                if (active_circle_batch != clip_batch ||
+                    active_circle_target != cur_rt)
+                {
+                    direct3ddevice->Clear(
+                        0, NULL, D3DCLEAR_STENCIL, 0, 1.0f, 0);
+
+                    if (circular_clip)
+                    {
+                        DrawCircularStencilMask(direct3ddevice.get(), mask_rect);
+                    }
+                    else if (sprite_mask_texture && sprite_mask_texture->_tiles.size() == 1)
+                    {
+                        const Rect mask_sprite_rect =
+                            _currentBackbuffer->Scaling.ScaleRange(sprite_mask_rect);
+
+                        DrawSpriteStencilMask(
+                            direct3ddevice.get(),
+                            sprite_mask_texture->_tiles[0].texture.get(),
+                            mask_sprite_rect);
+                    }
+
+                    active_circle_batch = clip_batch;
+                    active_circle_target = cur_rt;
+                }
+
+                // Render sprites only where the stencil value is 1.
+                direct3ddevice->SetRenderState(D3DRS_STENCILENABLE, TRUE);
+                direct3ddevice->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_EQUAL);
+                direct3ddevice->SetRenderState(D3DRS_STENCILREF, 1);
+                direct3ddevice->SetRenderState(D3DRS_STENCILMASK, 0xFF);
+                direct3ddevice->SetRenderState(D3DRS_STENCILWRITEMASK, 0);
+                direct3ddevice->SetRenderState(D3DRS_STENCILFAIL, D3DSTENCILOP_KEEP);
+                direct3ddevice->SetRenderState(D3DRS_STENCILZFAIL, D3DSTENCILOP_KEEP);
+                direct3ddevice->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_KEEP);
+            }
+            else
+            {
+                // Normal rectangular rendering.
+                direct3ddevice->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+            }
+
             _stageMatrixes.World = batch.Matrix;
             _rendSpriteBatch = batch.ID;
+
             cur_spr = RenderSpriteBatch(batch, cur_spr, rend_sz);
             // at this point cur_spr iterator is updated past the last sprite in a sequence;
             // this may be the end of batch, but also may be the a begginning of a sub-batch
@@ -1443,6 +1728,7 @@ void D3DGraphicsDriver::RenderSpriteBatches()
             ((last_bat == last_batch_to_rend) || (_spriteBatchDesc[last_bat + 1].Parent != cur_bat)))
         {
             rt_parents.pop(); // pop RT ref from the history
+
             // Back to the parent batch
             cur_bat = _spriteBatchDesc[cur_bat].Parent;
         }
@@ -1461,7 +1747,7 @@ void D3DGraphicsDriver::RenderSpriteBatches()
     direct3ddevice->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
 }
 
-size_t D3DGraphicsDriver::RenderSpriteBatch(const D3DSpriteBatch &batch, size_t from, const Size &rend_sz)
+size_t D3DGraphicsDriver::RenderSpriteBatch(const D3DSpriteBatch& batch, size_t from, const Size& rend_sz)
 {
     if (batch.Skip)
     {
@@ -1469,9 +1755,11 @@ size_t D3DGraphicsDriver::RenderSpriteBatch(const D3DSpriteBatch &batch, size_t 
         return from;
     }
 
+    glm::mat4 render_matrix = batch.Matrix;
+
     for (; (from < _spriteList.size()) && (_spriteList[from].node == batch.ID); ++from)
     {
-        const auto &e = _spriteList[from];
+        const auto& e = _spriteList[from];
         if (e.skip)
             continue;
 
@@ -1483,11 +1771,11 @@ size_t D3DGraphicsDriver::RenderSpriteBatch(const D3DSpriteBatch &batch, size_t 
             if (auto *ddb = DoSpriteEvtCallback(e.x, reinterpret_cast<intptr_t>(direct3ddevice.get()), sx, sy))
             {
                 auto stageEntry = D3DDrawListEntry((D3DBitmap*)ddb, batch.ID, sx, sy);
-                RenderSprite(&stageEntry, batch.Matrix, batch.Color, rend_sz);
+                RenderSprite(&stageEntry, render_matrix, batch.Color, rend_sz);
             }
             break;
         default:
-            RenderSprite(&e, batch.Matrix, batch.Color, rend_sz);
+            RenderSprite(&e, render_matrix, batch.Color, rend_sz);
             break;
         }
     }
@@ -1548,7 +1836,12 @@ void D3DGraphicsDriver::InitSpriteBatch(size_t index, const SpriteBatchDesc &des
         if (!viewport.IsEmpty())
         {
             viewport = glmex::full_transform(viewport, parent.ViewportMat);
-            viewport = ClampToRect(parent.Viewport, viewport);
+
+            // Preserve the complete rectangle for circular and sprite-shaped viewports.
+            // Their masks will handle clipping against the screen edges.
+            if (desc.Shape != SpriteBatchDesc::kClipCircle &&
+                desc.Shape != SpriteBatchDesc::kClipSprite)
+                viewport = ClampToRect(parent.Viewport, viewport);
         }
         else
         {

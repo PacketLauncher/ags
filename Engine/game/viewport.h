@@ -23,6 +23,12 @@
 #include "util/geometry.h"
 #include "util/scaling.h"
 
+enum ViewportShape
+{
+    kViewportShapeRectangle = 0,
+    kViewportShapeCircle = 1,
+    kViewportShapeSprite = 2
+};
 class Camera;
 class Viewport;
 
@@ -135,6 +141,14 @@ public:
     int GetZOrder() const { return _zorder; }
     // Sets the viewport's z-order on screen
     void SetZOrder(int zorder);
+    // Gets the viewport's clipping shape
+    ViewportShape GetShape() const { return _shape; }
+    // Sets the viewport's clipping shape
+    void SetShape(ViewportShape shape) { _shape = shape; }
+    // Gets the sprite slot used as the viewport's clipping mask
+    int GetMaskSprite() const { return _maskSprite; }
+    // Sets the sprite slot used as the viewport's clipping mask
+    void SetMaskSprite(int sprite) { _maskSprite = sprite; }
 
     // Calculates room-to-viewport coordinate conversion.
     void AdjustTransformation();
@@ -182,6 +196,8 @@ private:
     CameraRef _camera;
     bool _visible = true;
     int _zorder = 0;
+    ViewportShape _shape = kViewportShapeRectangle;
+    int _maskSprite = 0;
     // Flags that tell whether this viewport's position on screen has changed recently
     bool _hasChangedPosition = false;
     bool _hasChangedOffscreen = false;

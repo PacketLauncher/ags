@@ -213,7 +213,12 @@ public:
     // (think of it as of a child scene node).
     // Optionally you can assign "filter flags" to this batch; this lets to filter certain
     // batches out during some operations, such as fading effects or making screenshots.
-    virtual void BeginSpriteBatch(const Rect &viewport, const SpriteTransform &transform, uint32_t filter_flags = 0) = 0;
+    virtual void BeginSpriteBatch(const Rect& viewport, const SpriteTransform& transform,
+        uint32_t filter_flags = 0, bool circular = false) = 0;
+
+    virtual void BeginSpriteBatch(const Rect& viewport, const SpriteTransform& transform,
+        uint32_t filter_flags, bool circular, int mask_sprite, bool use_sprite_mask,
+        std::shared_ptr<Texture> mask_texture) = 0;
     // Begins a sprite batch with defined viewport and a global model transformation
     // and a global flip setting. Optionally provides a surface which should be rendered
     // underneath the rest of the sprites.

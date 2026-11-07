@@ -16,6 +16,7 @@
 #include <array>
 #include <stack>
 #include "ac/sys_events.h"
+#include "ac/spritecache.h"
 #include "gfx/ali3dexception.h"
 #include "gfx/gfxfilter_sdl_renderer.h"
 #include "gfx/gfxfilter_aa_sdl_renderer.h"
@@ -23,7 +24,11 @@
 #include "platform/base/agsplatformdriver.h"
 #include "platform/base/sys_main.h"
 #include "util/string_compat.h"
+#include <cmath>
 
+using namespace AGS::Common;
+
+extern SpriteCache spriteset;
 
 namespace AGS
 {
@@ -403,8 +408,10 @@ void SDLRendererGraphicsDriver::InitSpriteBatch(size_t index, const SpriteBatchD
     // Subbitmaps are clamped to the parent's bounds, so this is only valid if the
     // viewport is fully inside; otherwise the batch's surface would be smaller than
     // expected, and nested batches would get squeezed into it.
-    else if (transform.ScaleX == 1.f && transform.ScaleY == 1.f && transform.Rotate == 0.f &&
-             IsRectInsideRect(RectWH(parent_surf->GetSize()), viewport))
+    else if (desc.Shape != SpriteBatchDesc::kClipCircle &&
+        desc.Shape != SpriteBatchDesc::kClipSprite &&
+        transform.ScaleX == 1.f && transform.ScaleY == 1.f && transform.Rotate == 0.f &&
+        IsRectInsideRect(RectWH(parent_surf->GetSize()), viewport))
     {
         // We need this subbitmap for plugins, which use _stageVirtualScreen and are unaware of possible multiple viewports;
         // TODO: there could be ways to optimize this further, but best is to update plugin rendering hooks (and upgrade plugins)
@@ -557,10 +564,105 @@ void SDLRendererGraphicsDriver::RenderToBackBuffer()
             const Rect &viewport = batch.Viewport;
 
             // If we're not drawing directly to the subregion of a parent surface,
-            // then blit our own surface to the parent's
+// then blit our own surface to the parent's
             if (surface && !batch.IsParentRegion)
             {
-                parent_surf->StretchBlt(surface, viewport, batch.Opaque ? kBitmap_Copy : kBitmap_Transparency);
+                if (batch_desc.Shape == SpriteBatchDesc::kClipCircle)
+                {
+                    // Draw the viewport into a temporary bitmap and copy only
+                    // pixels inside the circular boundary.
+                    Bitmap scaled(viewport.GetWidth(), viewport.GetHeight(), parent_surf->GetColorDepth());
+                    scaled.ClearTransparent();
+                    scaled.StretchBlt(surface, RectWH(scaled.GetSize()),
+                        batch.Opaque ? kBitmap_Copy : kBitmap_Transparency);
+
+                    const int width = scaled.GetWidth();
+                    const int height = scaled.GetHeight();
+                    const float radius = std::min(width, height) * 0.5f;
+                    const float center_x = width * 0.5f;
+                    const float center_y = height * 0.5f;
+                    const float radius_sq = radius * radius;
+
+                    // Make pixels outside the circular boundary transparent.
+                    const int mask_color = scaled.GetMaskColor();
+
+                    for (int y = 0; y < height; ++y)
+                    {
+                        const float dy = (y + 0.5f) - center_y;
+                        const float half_width = std::sqrt(std::max(0.0f, radius_sq - dy * dy));
+
+                        // Calculate the horizontal range of pixels inside the circle.
+                        const int left = std::max(0,
+                            static_cast<int>(std::ceil(center_x - half_width - 0.5f)));
+                        const int right = std::min(width - 1,
+                            static_cast<int>(std::floor(center_x + half_width - 0.5f)));
+
+                        // Clear only pixels outside the circular boundary.
+                        for (int x = 0; x < left; ++x)
+                            scaled.PutPixel(x, y, mask_color);
+
+                        for (int x = right + 1; x < width; ++x)
+                            scaled.PutPixel(x, y, mask_color);
+                    }
+
+                    // Composite the circular image using AGS's masked blitting.
+                    parent_surf->Blit(&scaled, 0, 0, viewport.Left, viewport.Top,
+                        width, height, kBitmap_Transparency);
+                }
+                else if (batch_desc.Shape == SpriteBatchDesc::kClipSprite)
+                {
+                    // Render the viewport to an intermediate bitmap.
+                    Bitmap scaled(viewport.GetWidth(), viewport.GetHeight(),
+                        parent_surf->GetColorDepth());
+                    scaled.ClearTransparent();
+
+                    scaled.StretchBlt(surface, RectWH(scaled.GetSize()),
+                        batch.Opaque ? kBitmap_Copy : kBitmap_Transparency);
+
+                    // Obtain the mask sprite from the sprite cache.
+                    const Bitmap* mask = spriteset[batch_desc.MaskSprite];
+
+                    if (mask && mask->GetWidth() > 0 && mask->GetHeight() > 0)
+                    {
+                        const int width = scaled.GetWidth();
+                        const int height = scaled.GetHeight();
+                        const int mask_width = mask->GetWidth();
+                        const int mask_height = mask->GetHeight();
+                        const int mask_color = mask->GetMaskColor();
+                        const int transparent_color = scaled.GetMaskColor();
+
+                        // Apply the mask, scaling it to the viewport.
+                        for (int y = 0; y < height; ++y)
+                        {
+                            const int mask_y = y * mask_height / height;
+
+                            for (int x = 0; x < width; ++x)
+                            {
+                                const int mask_x = x * mask_width / width;
+                                const int pixel = mask->GetPixel(mask_x, mask_y);
+
+                                bool visible = (pixel != mask_color);
+
+                                // For 32-bit sprites, use their alpha channel.
+                                if (mask->GetColorDepth() == 32)
+                                    visible = visible && (geta32(pixel) > 0);
+
+                                if (!visible)
+                                    scaled.PutPixel(x, y, transparent_color);
+                            }
+                        }
+
+                        // Composite only the visible pixels.
+                        parent_surf->Blit(&scaled, 0, 0,
+                            viewport.Left, viewport.Top,
+                            width, height, kBitmap_Transparency);
+                    }
+                }
+                else
+                {
+                    parent_surf->StretchBlt(surface, viewport,
+                        batch.Opaque ? kBitmap_Copy : kBitmap_Transparency);
+                }
             }
 
             // Back to the parent batch

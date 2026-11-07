@@ -668,6 +668,8 @@ static void RestoreViewportsAndCameras(const RestoredData &r_data)
         else
             view->SetRect(RectWH(view_dat.Left, view_dat.Top, view_dat.Width, view_dat.Height));
         view->SetZOrder(view_dat.ZOrder);
+        view->SetShape(static_cast<ViewportShape>(view_dat.Shape));
+        view->SetMaskSprite(view_dat.MaskSprite);
         // Restore camera link
         int cam_index = view_dat.CamID;
         if (cam_index < 0) continue;
